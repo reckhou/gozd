@@ -1,85 +1,138 @@
-`gozd`, is a configurable zero downtime daemon(TCP/HTTP/FCGI) framework write in golang.
+#Configurable zero downtime daemon(TCP/HTTP/FCGI) framework write in golang. 
+
+All it takes is integrating just one simple call to gozd.Daemonize(). Then you will get:
+
+1. upgrade binary/service with absolutely zero downtime. high availability!
+2. listen to multiple port and/or socket in the same program. also able to add/remove/update them with zero downtime.
+3. gracefully shutdown service without breaking any existing connections.
+
+####Status: Acceptance testing
+
+* * *
 
 ##How to install
 
-    go get -u bitbucket.org/kardianos/osext
-    go get -u bitbucket.org/PinIdea/go-zero-downtime-daemon
+    go get -u bitbucket.org/PinIdea/zero-downtime-daemon
 
 ##Sample Code & Integration
 
-There are sample `TCP/HTTP/FCGI` programs in examples:
+There are sample programs in the "examples" directory.
 
-    package main
-    
-    import (
-      "bitbucket.org/PinIdea/go-zero-downtime-daemon"
-    )
-    
-    func serveTCP(conn gozd.Conn) {
-      // your own TCP handler
-    }
-    
-    func main() {
-      daemonChan := gozd.Daemonize()
-      gozd.RegistHandler("Group0", "serveTCP", serveTCP)
-      if err != nil {
-        fmt.Println(err.Error())
-        return
-      }
-    
-      // wait till daemon send a exit signal
-      <-daemonChan
-    }
+* tcp_daemon.go      
+  *demonstrate typical tcp service daemon, listen to multiple socket and ports*     
+* args_n_conf.go         
+  *demonstrate controling daemon reload config from file by command line arguments*      
+* fcgi_std.go        
+  *demonstrate typical fcgi service daemon*     
+* fcgi_daemon.go	  
+  *demonstrate extended fcgi service daemon, able to process server params*     
+* http_daemon.go	 
+  *demonstrate typical http service daemon*     
+* https_daemon.go	
+  *demonstrate typical https service daemon*     
+* mixed_daemon.go (advanced usage)
+  *demonstrate mixed service(tcp/fcgi/http/https) daemon, listen to diffrent socket and ports*
 
-These are the major intergration steps:
+Basic integration steps are:
 
-1. Call `Daemonize()` to initialize `gozd` & obtain a channel to receive exit signal from `gozd`.
-2. Call `gozd.RegistHandler()` to regist your own handler function, its parameters MUST contain a `gozd.Conn` type, which encapsulates `net.Conn` you used before. Replace `net.Conn` with `gozd.Conn`. However, you HAVE to use configuration file to tell gozd ports your program listening instead of `Listen()` to these ports yourself.
-3. Run your own logic, main goroutine MUST not be blocked in your own logic.
-4. Wait till daemon send a exit signal, do some cleanup if you want.
+1. Initialize a channel and prepare a goroutine to handler new net.Listener 
+2. Call `gozd.Daemonize(Context, chan net.Listener)` to initialize `gozd` & obtain a channel to receive exit signal from `gozd`.
+3. Wait till daemon send a exit signal, do some cleanup if you want.
 
 ##Daemon Usage
 
-Once you build your program based on gozd, you can use following command line arguments to start the daemon and other operations.  A daemon configuration file MUST be prepared for your program.
+> kill -TERM <pid>  send signal to gracefully shutdown daemon without breaking existing connections and services.
 
-    -s Send signal to old process: <start, stop, quit, reopen, reload>.
-
-    -c Set configuration file path.
-
-    -f Running foreground for debug, recommended if you are using GDB or other debuggers.
-
-    -v Show GOZD log.
-
-> kill -HUP <pid>  send signal to restart daemon's latest binary, without break current connections and services.
+> kill -HUP <pid>  send signal to start daemon's latest binary, without breaking existing connections and services, and also absolutely zero downtime. old process will be gracefully shut down.
 
 ##Daemon Configuration
 
-    [Group0]
-    mode     [tcp|http|https|fcgi]
-    listen   [ip|port|unix socket]
+    ctx  := gozd.Context{
+      Hash:[DAEMON_NAME],
+      Command:[start,stop,reload],
+      Logfile:[LOG_FILEPATH,""], 
+      Maxfds: {[RLIMIT_NOFILE_SOFTLIMIT],[RLIMIT_NOFILE_HARDLIMIT]}
+      User:   [USERID],
+      Group:  [GROUPID],
+      Directives:map[string]gozd.Server{
+        [SERVER_ID]:gozd.Server{
+          Network:["unix","tcp"],
+          Address:[SOCKET_FILE(eg./tmp/daemon.sock),TCP_ADDR(eg. 127.0.0.1:80)],
+          Chmod:0666,
+        },
+        ...
+      },
+    }
+    cl := make(chan net.Listener,1)
+    go handleListners(cl)
+    sig, err := gozd.Daemonize(ctx, cl) 
+    // ...
+    for s := range sig  {
+      switch s {
+      case syscall.SIGHUP, syscall.SIGUSR2:
+        // do some custom jobs while reload/hotupdate
+      
     
-    [Group1]
-    mode     [tcp|http|https|fcgi]
-    listen   [ip|port|unix socket]
+      case syscall.SIGTERM:
+        // do some clean up and exit
+        return
+      }
+    }
+   
+
+##Functions
+
+###func Daemonize
+    func Daemonize(ctx Context, cl chan net.Listener) (c chan bool, err error)
     
-    [Group2]
-    mode     [tcp|http|https|fcgi]
-    listen   [ip|port|unix socket]
-    key      <path of ssl key file>
-    cert     <path of ssl cert file>
+###type Context
+    type Context struct {
+        Hash       string
+        User       string
+        Group      string
+        Maxfds     syscall.Rlimit
+        Command    string
+        Logfile    string
+        Pidfile    string
+        Directives map[string]Server
+    }
 
-##How to test
+###type Server
+    type Server struct {
+        Network, Address string      // eg: unix/tcp, socket/ip:port. see net.Dial
+        Chmod            os.FileMode // file mode for unix socket, default 0666
+    }
 
-Once you have done intergration, do these steps to test if daemon is working properly:
+##Typical usage
 
-1. Use -v & -f to run, make sure no [GOZDERR] message displayed. Without -f, all output of your app will be redirected to `/dev/null` by default.
+Gateway, Load Balancer, Stateless Service
+  
+##TODO
 
-2. Connect to your app, the client should take a keep-alive connection with port or socket defined in config file.
+test cases
 
-3. Use `kill -HUP <your app's pid>` while the client should not be disconnected.
+  + race condition test
+  + stress test
+  + more context config validations
+  + better default place to store and lock pid
 
-4. Start another client, do step 2 again.
+##How to contribute
 
-5. Use `ps aux | grep <your app name>` or any other tool you like, 2 process of your app should running.
+Help is needed to write more test cases and stress test.
 
-6. If at least one of your app process is already running, using `-s start` to start another instance should NOT work.
+Patches or suggestions that can make the code simpler or easier to use are welcome to submit to [issue area](https://bitbucket.org/PinIdea/go-zero-downtime-daemon/issues?status=new&status=open).
+
+##How it works
+
+The basic principle: master process fork the process, and child process evecve corresponding binary which inherit the file descriptions of the listening port and/or socket. 
+
+`os.StartProcess` did the trick to append files that contains handle that is can be inherited. Then the child process can start listening from same handle which we passed fd number via environment variable as index. After that we use `net.FileListener` to recreate net.Listener interface to gain access to the socket created by last master process.
+
+We also expand the net.Listener and net.Conn, so that the master process will stop accept new connection and wait until all existing connection to dead naturally before exit the process. 
+
+The detail in in the code of reload() in daemon.go. 
+
+##Special Thanks
+
+The zero downtime idea and code is inspired by nginx and beego. Thanks.
+
